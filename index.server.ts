@@ -1,0 +1,146 @@
+import type {
+  PluginHookAgent,
+  PluginHookContext,
+  PluginServerContext,
+} from "@getpaseo/plugin/server";
+import { findLimitNotice, resetFromClock, type TimelineItem } from "./server/notice";
+import { describeUsage, findExhaustion, resetFromUsage } from "./server/usage";
+
+// Fixed text. Nothing from the transcript or the provider error is ever sent.
+const RESUME_PROMPT =
+  "Your previous turn stopped because the provider usage limit was reached. " +
+  "The limit has now reset. Continue where you left off. " +
+  "If the task was already complete, reply briefly that it is done and do nothing else.";
+
+const MINUTE = 60_000;
+const RESUME_DELAY_AFTER_RESET_MS = 2 * MINUTE;
+// Paseo caches provider usage for five minutes; re-check once after that expires.
+const STALE_USAGE_RECHECK_MS = 6 * MINUTE;
+// Longest wait we accept. Covers weekly limits; anything later is treated as unknown.
+const MAX_WAIT_MS = 8 * 24 * 60 * MINUTE;
+// A 5-hour window can reset at most five times in 24 hours; one more allows a weekly reset.
+// Each limit is already resumed only once; this cap is a backstop against runaway loops.
+const MAX_RESUMES_PER_AGENT_PER_DAY = 6;
+const DAEMON_TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+type PaseoApi = PluginHookContext["paseo"];
+
+interface Pending {
+  timer: ReturnType<typeof setTimeout>;
+  label: string;
+}
+
+export default function contribute(server: PluginServerContext) {
+  const pending = new Map<string, Pending>();
+  const resumedLimits = new Set<string>();
+  const resumeTimes = new Map<string, number[]>();
+
+  function cancel(agentId: string, reason: string) {
+    const entry = pending.get(agentId);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    pending.delete(agentId);
+    console.log(`[${agentId}] cancelled ${entry.label}: ${reason}`);
+  }
+
+  function schedule(agentId: string, delayMs: number, label: string, run: () => Promise<void>) {
+    cancel(agentId, "replaced");
+    const timer = setTimeout(() => {
+      pending.delete(agentId);
+      run().catch((error) => console.error(`[${agentId}] ${label} failed:`, error));
+    }, delayMs);
+    pending.set(agentId, { timer, label });
+    console.log(`[${agentId}] scheduled ${label} at ${new Date(Date.now() + delayMs).toISOString()}`);
+  }
+
+  function scheduleResume(agent: PluginHookAgent, paseo: PaseoApi, limitId: string, resetsAtMs: number) {
+    const now = Date.now();
+    const limitKey = `${agent.id}:${limitId}:${resetsAtMs}`;
+    if (resumedLimits.has(limitKey)) {
+      console.log(`[${agent.id}] already resumed once for ${limitId}; not repeating`);
+      return;
+    }
+    const recent = (resumeTimes.get(agent.id) ?? []).filter((time) => now - time < 24 * 60 * MINUTE);
+    if (recent.length >= MAX_RESUMES_PER_AGENT_PER_DAY) {
+      console.log(`[${agent.id}] daily resume cap reached; not scheduling`);
+      return;
+    }
+
+    const delayMs = Math.max(0, resetsAtMs - now) + RESUME_DELAY_AFTER_RESET_MS;
+    schedule(agent.id, delayMs, `resume after ${limitId} reset`, async () => {
+      const ref = paseo.agents.ref(agent.id);
+      await ref.refresh();
+      const busy = ref.status === "running" || ref.status === "initializing";
+      if (busy || ref.status === "closed" || ref.archivedAt || ref.activeTurn || ref.pendingPermissions?.length) {
+        console.log(`[${agent.id}] skipped resume: agent is ${ref.status ?? "unavailable"}`);
+        return;
+      }
+      resumedLimits.add(limitKey);
+      resumeTimes.set(agent.id, [...recent, Date.now()]);
+      await ref.send(RESUME_PROMPT);
+      console.log(`[${agent.id}] resumed`);
+    });
+  }
+
+  async function readUsage(agent: PluginHookAgent, paseo: PaseoApi) {
+    const { providers } = await paseo.providers.listUsage();
+    console.log(`[${agent.id}] usage: ${describeUsage(providers, agent.provider)}`);
+    return providers;
+  }
+
+  async function checkUsageAfterFailure(agent: PluginHookAgent, paseo: PaseoApi, isRecheck: boolean) {
+    const providers = await readUsage(agent, paseo);
+    const exhaustion = findExhaustion(providers, agent.provider, Date.now(), MAX_WAIT_MS);
+    if (exhaustion) {
+      scheduleResume(agent, paseo, exhaustion.limitId, exhaustion.resetsAtMs);
+    } else if (!isRecheck) {
+      schedule(agent.id, STALE_USAGE_RECHECK_MS, "usage re-check", () =>
+        checkUsageAfterFailure(agent, paseo, true),
+      );
+    }
+  }
+
+  async function onTurnEnded(
+    agent: PluginHookAgent,
+    failed: boolean,
+    timeline: readonly TimelineItem[],
+    paseo: PaseoApi,
+  ) {
+    // Claude Code reports a usage limit as an ordinary final message, not as an error,
+    // so the notice is the primary signal. It must be the last line of the final text.
+    const notice = findLimitNotice(timeline);
+    if (notice) {
+      const providers = await readUsage(agent, paseo);
+      const now = Date.now();
+      const resetsAtMs =
+        resetFromUsage(providers, agent.provider, notice.kind, now, MAX_WAIT_MS) ??
+        resetFromClock(notice, now, DAEMON_TIME_ZONE);
+      if (resetsAtMs === null) {
+        console.log(`[${agent.id}] ${notice.kind} limit notice, but no usable reset time; not resuming`);
+        return;
+      }
+      scheduleResume(agent, paseo, `${notice.kind} limit`, resetsAtMs);
+      return;
+    }
+    // Other providers may fail the turn instead; confirm with usage data.
+    if (failed) await checkUsageAfterFailure(agent, paseo, false);
+  }
+
+  // Any new turn, whether from the user or elsewhere, means the agent is no longer waiting.
+  server.on("agent.turn_started", ({ agent }) => cancel(agent.id, "a new turn started"));
+  server.on("agent.archived", ({ agent }) => cancel(agent.id, "agent archived"));
+
+  server.on("agent.turn_ended", async ({ agent, outcome, timeline }, { paseo }) => {
+    if (outcome.kind === "canceled") return;
+    console.log(`[${agent.id}] turn ${outcome.kind} (${agent.provider})`);
+    try {
+      await onTurnEnded(agent, outcome.kind === "failed", timeline, paseo);
+    } catch (error) {
+      console.error(`[${agent.id}] limit check failed:`, error);
+    }
+  });
+
+  return () => {
+    for (const agentId of [...pending.keys()]) cancel(agentId, "plugin stopped");
+  };
+}
