@@ -22,6 +22,11 @@ Two minutes after the reset, it sends the agent a fixed prompt:
 > reset. Continue where you left off. If the task was already complete, reply briefly that it is
 > done and do nothing else.
 
+Before sending it, the plugin marks the agent as read. Paseo notifies only when an agent goes
+from read to unread, so without this an unopened limit notice would keep the resumed turn from
+notifying when it finishes. The plugin API has no call for this, so the plugin sends the same
+request the app sends when an agent is opened, over its existing daemon connection.
+
 ## Safeguards
 
 - The prompt is fixed text. Nothing from the transcript or the provider error is sent.
@@ -34,6 +39,8 @@ Two minutes after the reset, it sends the agent a fixed prompt:
 ## Limitations
 
 - Pending resumes live in memory; a plugin reload or daemon restart drops them.
+- Marking the agent as read relies on Paseo's internal plugin connection format, which a
+  Paseo update could change. If it breaks, the resume still happens but may not notify.
 - Providers without usage data in Paseo (for example DeepSeek) are never resumed.
 - Credit balances are ignored, since a zero prepaid balance is normal.
 - A weekly notice that names a date rather than a time is not matched.

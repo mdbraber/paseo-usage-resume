@@ -3,6 +3,7 @@ import type {
   PluginHookContext,
   PluginServerContext,
 } from "@getpaseo/plugin/server";
+import { clearAttention } from "./server/attention";
 import { findLimitNotice, resetFromClock, type TimelineItem } from "./server/notice";
 import { describeUsage, findExhaustion, resetFromUsage } from "./server/usage";
 
@@ -77,6 +78,10 @@ export default function contribute(server: PluginServerContext) {
       }
       resumedLimits.add(limitKey);
       resumeTimes.set(agent.id, [...recent, Date.now()]);
+      // Otherwise the unread limit notice suppresses the notification for the resumed turn.
+      if (ref.current()?.requiresAttention && !clearAttention(agent.id)) {
+        console.log(`[${agent.id}] could not clear the unread flag; the resumed turn may not notify`);
+      }
       await ref.send(RESUME_PROMPT);
       console.log(`[${agent.id}] resumed`);
     });
