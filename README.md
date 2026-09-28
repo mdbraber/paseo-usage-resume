@@ -8,7 +8,7 @@ provider usage limit, once the limit has reset.
 When an agent's turn ends, the plugin checks why it stopped:
 
 - **Claude** reports a usage limit as an ordinary final message, for example
-  `You've hit your session limit · resets 5:50pm (Europe/Berlin)`. The plugin acts only when
+  `You've hit your session limit · resets 5:50pm (America/Los_Angeles)`. The plugin acts only when
   that notice is the last line of the agent's final message and matches exactly. The reset time
   comes from Paseo's usage data for the matching window. Without it, the plugin converts the
   notice's clock time from the time zone the notice names, so it works on daemons in any zone.
@@ -51,7 +51,7 @@ Plugins must be enabled on the daemon (**Settings → Plugins → Enable plugins
 runs as trusted, unsandboxed code on that daemon, so install it only from a source you control.
 
 ```bash
-paseo plugin install github:<owner>/paseo-usage-resume
+paseo plugin install github:mdbraber/paseo-usage-resume
 paseo plugin ls                          # expect: running
 paseo plugin logs paseo-usage-resume     # one line per finished turn, plus usage numbers
 ```

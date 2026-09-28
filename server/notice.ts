@@ -1,5 +1,5 @@
 // Detects Claude Code's usage-limit notice, e.g.
-//   "You've hit your session limit · resets 5:50pm (Europe/Berlin)"
+//   "You've hit your session limit · resets 5:50pm (America/Los_Angeles)"
 // Pure functions, no I/O.
 
 export interface TimelineItem {
