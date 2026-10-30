@@ -59,7 +59,7 @@ function providerEntry(usage: readonly ProviderUsage[], providerId: string) {
 }
 
 /**
- * Reset time for a limit named in a notice ("session", "weekly", "opus weekly"),
+ * Reset time for a limit named in a notice ("session", "5-hour", "weekly", "opus weekly"),
  * taken from the matching usage window. Structured data beats the notice's clock time.
  */
 export function resetFromUsage(
@@ -72,9 +72,9 @@ export function resetFromUsage(
   const entry = providerEntry(usage, providerId);
   if (!entry) return null;
   const candidates =
-    noticeKind === "session"
+    /session|\b5[- ]?h|five[- ]hour/.test(noticeKind)
       ? entry.windows.filter((window) => window.id === "five_hour")
-      : noticeKind.includes("weekly")
+      : /week/.test(noticeKind)
         ? entry.windows
             .filter((window) => window.id.startsWith("weekly"))
             .sort((a, b) => (b.usedPct ?? 0) - (a.usedPct ?? 0))

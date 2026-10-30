@@ -1,5 +1,8 @@
 // Detects Claude Code's usage-limit notice, e.g.
 //   "You've hit your session limit · resets 5:50pm (America/Los_Angeles)"
+//   "You've hit your 5-hour limit · resets 10:40pm (Europe/Amsterdam)"
+//   "You've reached your Opus weekly limit · resets Nov 3, 9am (Europe/Amsterdam)"
+//   "Claude usage limit reached. Your limit will reset at 5pm (America/Los_Angeles)."
 // Pure functions, no I/O.
 
 export interface TimelineItem {
@@ -8,16 +11,39 @@ export interface TimelineItem {
 }
 
 export interface LimitNotice {
-  /** "session", "weekly", "opus weekly", ... as written in the notice. */
+  /** "session", "5-hour", "weekly", "opus weekly", ... as written in the notice; "usage" when it names none. */
   kind: string;
+  /** Month (1-12) and day when the notice names a date, otherwise null. */
+  month: number | null;
+  day: number | null;
   hour: number;
   minute: number;
   timeZone: string | null;
 }
 
 // The whole line must be the notice. Anything the agent quoted mid-sentence does not match.
-const NOTICE =
-  /^You['’]ve hit your ([a-z0-9 ]+?) limit\s*[·∙•-]\s*resets (\d{1,2})(?::(\d{2}))?\s*([ap]m)(?:\s*\(([A-Za-z0-9_+\-/]+)\))?$/i;
+// Wording, separator, date and clock format vary between Claude Code versions, so each is loose;
+// the anchors, the "limit" header and the "reset" time keep it from matching ordinary prose.
+const NOTICE = new RegExp(
+  [
+    "^(?:You(?:['’]ve| have) (?:hit|reached) your (.{1,40}?) limit|Claude(?: AI)?(?: usage)? limit reached)",
+    "\\s*[·∙•|,.:;–—-]?\\s*",
+    "(?:(?:your )?limit will )?resets?(?: at| on)?\\s+",
+    // Optional date: "Nov 3, ", "November 3rd at ", "3 Nov, ".
+    "(?:([A-Za-z]{3,9})\\.? (\\d{1,2})(?:st|nd|rd|th)?,?(?: at)?\\s+|(\\d{1,2}) ([A-Za-z]{3,9})\\.?,?(?: at)?\\s+)?",
+    // Clock: "5pm", "5:50 PM", "5.50 p.m.", "17:50".
+    "(\\d{1,2})(?:[:.](\\d{2}))?\\s*(?:([ap])\\.?m\\.?)?",
+    "(?:\\s*\\(([^()\\s]+)\\))?\\.?$",
+  ].join(""),
+  "i",
+);
+
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+
+function monthNumber(name: string): number | null {
+  const index = MONTHS.indexOf(name.slice(0, 3).toLowerCase());
+  return index < 0 ? null : index + 1;
+}
 
 /**
  * Returns the notice when it is the last line of the agent's final text, i.e. the
@@ -34,12 +60,30 @@ export function findLimitNotice(timeline: readonly TimelineItem[]): LimitNotice 
 
   const match = NOTICE.exec(lastLine);
   if (!match) return null;
-  const [, kind, hourText, minuteText, meridiem, timeZone] = match;
-  const hour12 = Number(hourText);
+  const [, kind, monthFirst, dayAfter, dayFirst, monthAfter, hourText, minuteText, meridiem, timeZone] = match;
+
+  let month: number | null = null;
+  let day: number | null = null;
+  const monthName = monthFirst ?? monthAfter;
+  if (monthName) {
+    month = monthNumber(monthName);
+    day = Number(dayAfter ?? dayFirst);
+    if (month === null || day < 1 || day > 31) return null;
+  }
+
+  const rawHour = Number(hourText);
   const minute = minuteText ? Number(minuteText) : 0;
-  if (hour12 < 1 || hour12 > 12 || minute > 59) return null;
-  const hour = (hour12 % 12) + (meridiem!.toLowerCase() === "pm" ? 12 : 0);
-  return { kind: kind!.toLowerCase(), hour, minute, timeZone: timeZone ?? null };
+  if (minute > 59) return null;
+  let hour: number;
+  if (meridiem) {
+    if (rawHour < 1 || rawHour > 12) return null;
+    hour = (rawHour % 12) + (meridiem.toLowerCase() === "p" ? 12 : 0);
+  } else {
+    // Without am/pm only a 24-hour clock with minutes is unambiguous.
+    if (!minuteText || rawHour > 23) return null;
+    hour = rawHour;
+  }
+  return { kind: kind?.trim().toLowerCase() ?? "usage", month, day, hour, minute, timeZone: timeZone ?? null };
 }
 
 interface WallClock {
@@ -107,7 +151,7 @@ function isValidTimeZone(timeZone: string): boolean {
 }
 
 /**
- * Next occurrence of the notice's clock time in the time zone the notice names,
+ * Next occurrence of the notice's date and clock time in the time zone the notice names,
  * or in the daemon's time zone when it names none. Returns null for an unknown zone.
  */
 export function resetFromClock(
@@ -118,9 +162,17 @@ export function resetFromClock(
   const timeZone = notice.timeZone ?? daemonTimeZone;
   if (!isValidTimeZone(timeZone)) return null;
   const today = wallClock(nowMs, timeZone);
+  // A reset that passed moments ago is still the right one; older means the next occurrence.
+  const passed = (reset: number) => reset < nowMs - 10 * 60_000;
+  if (notice.month !== null && notice.day !== null) {
+    let reset = zonedToUtc(today.year, notice.month, notice.day, notice.hour, notice.minute, timeZone);
+    if (passed(reset)) {
+      reset = zonedToUtc(today.year + 1, notice.month, notice.day, notice.hour, notice.minute, timeZone);
+    }
+    return reset;
+  }
   let reset = zonedToUtc(today.year, today.month, today.day, notice.hour, notice.minute, timeZone);
-  // A reset that passed moments ago is still the right one; older means tomorrow.
-  if (reset < nowMs - 10 * 60_000) {
+  if (passed(reset)) {
     reset = zonedToUtc(today.year, today.month, today.day + 1, notice.hour, notice.minute, timeZone);
   }
   return reset;

@@ -9,7 +9,8 @@ When an agent's turn ends, the plugin checks why it stopped:
 
 - **Claude** reports a usage limit as an ordinary final message, for example
   `You've hit your session limit · resets 5:50pm (America/Los_Angeles)`. The plugin acts only when
-  that notice is the last line of the agent's final message and matches exactly. The reset time
+  that notice is the last line of the agent's final message. The wording, separator, date and
+  clock format may vary, since Claude Code has changed them over time. The reset time
   comes from Paseo's usage data for the matching window. Without it, the plugin converts the
   notice's clock time from the time zone the notice names, so it works on daemons in any zone.
 - **Codex** and other providers with usage data fail the turn instead. The plugin then reads
@@ -43,7 +44,9 @@ request the app sends when an agent is opened, over its existing daemon connecti
   Paseo update could change. If it breaks, the resume still happens but may not notify.
 - Providers without usage data in Paseo (for example DeepSeek) are never resumed.
 - Credit balances are ignored, since a zero prepaid balance is normal.
-- A weekly notice that names a date rather than a time is not matched.
+- A notice whose wording departs further than the variants in `test/notice.test.ts` is not
+  matched. The plugin logs every finished turn, so a missed notice shows up as a turn with no
+  `usage:` line after it.
 
 ## Install
 
