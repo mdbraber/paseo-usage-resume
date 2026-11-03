@@ -55,7 +55,7 @@ export function findLimitNotice(timeline: readonly TimelineItem[]): LimitNotice 
   const finalText = timeline
     .slice(start)
     .map((item) => item.text ?? "")
-    .join("");
+    .join("\n"); // timeline items carry no trailing newline; joining with "" glues the notice onto the previous reply
   const lastLine = finalText.trim().split("\n").pop()?.trim() ?? "";
 
   const match = NOTICE.exec(lastLine);

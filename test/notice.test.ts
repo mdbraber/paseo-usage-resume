@@ -145,3 +145,15 @@ test("prefers the matching usage window's reset time", () => {
   assert.equal(resetFromUsage(usage, "claude", "weekly", now, 8 * 86400_000), Date.parse("2026-09-30T10:00:00Z"));
   assert.equal(resetFromUsage(usage, "claude", "extra usage", now, 8 * 86400_000), null);
 });
+
+// Paseo timeline items do not end with a newline. A turn started by a background-task notification or a schedule has no
+// user_message between the previous reply and the notice, so the two are adjacent assistant items.
+test("finds the notice when the previous reply does not end with a newline", () => {
+  const timeline = [assistant("When it lands, I'll show you that brief."), assistant(NOTICE)];
+  assert.equal(findLimitNotice(timeline)?.kind, "session");
+});
+
+test("finds the notice when the previous turn also ended on a notice", () => {
+  const timeline = [assistant(NOTICE), assistant(NOTICE)];
+  assert.equal(findLimitNotice(timeline)?.kind, "session");
+});
