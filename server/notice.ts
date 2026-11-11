@@ -8,6 +8,8 @@
 export interface TimelineItem {
   type: string;
   text?: string;
+  // Paseo stores some provider errors, including usage limits, as "error" items with a message.
+  message?: string;
 }
 
 export interface LimitNotice {
@@ -21,7 +23,7 @@ export interface LimitNotice {
   timeZone: string | null;
 }
 
-// The whole line must be the notice. Anything the agent quoted mid-sentence does not match.
+// The notice must run to the end of the line. Anything the agent quoted mid-sentence does not match.
 // Wording, separator, date and clock format vary between Claude Code versions, so each is loose;
 // the anchors, the "limit" header and the "reset" time keep it from matching ordinary prose.
 const NOTICE = new RegExp(
@@ -45,20 +47,55 @@ function monthNumber(name: string): number | null {
   return index < 0 ? null : index + 1;
 }
 
+const FINAL_TEXT_TYPES = new Set(["assistant_message", "error"]);
+
+function textOf(item: TimelineItem): string {
+  return item.type === "error" ? (item.message ?? "") : (item.text ?? "");
+}
+
+/** The assistant messages and error items after the last item of any other kind. */
+function finalItems(timeline: readonly TimelineItem[]): readonly TimelineItem[] {
+  let start = timeline.length;
+  while (start > 0 && FINAL_TEXT_TYPES.has(timeline[start - 1]?.type ?? "")) start--;
+  return timeline.slice(start);
+}
+
+function lastLineOf(text: string): string {
+  return text.trim().split("\n").pop()?.trim() ?? "";
+}
+
+// Where a notice can begin inside a line. The notice may follow the agent's own last sentence
+// on the same line, because separate assistant messages can be joined without a line break.
+const NOTICE_START = /You(?:['’]ve| have) (?:hit|reached) your |Claude(?: AI)?(?: usage)? limit reached/gi;
+// What may come directly before a notice that does not start the line: a space or the end
+// of a sentence. A quote mark is excluded, so a quoted notice never counts.
+const BEFORE_NOTICE = /[\s.!?:;)\]]/;
+
+/** Matches a line that is a notice, or that ends with a notice after the agent's own sentence. */
+function matchNoticeLine(line: string): RegExpExecArray | null {
+  for (const start of line.matchAll(NOTICE_START)) {
+    const index = start.index ?? 0;
+    if (index > 0 && !BEFORE_NOTICE.test(line[index - 1] ?? "")) continue;
+    const match = NOTICE.exec(line.slice(index));
+    if (match) return match;
+  }
+  return null;
+}
+
 /**
- * Returns the notice when it is the last line of the agent's final text, i.e. the
- * assistant messages after the last item of any other kind. Returns null otherwise.
+ * Returns the notice when it ends the agent's final text (the assistant messages and error items
+ * after the last item of any other kind). Returns null otherwise.
+ *
+ * Streamed chunks of one message are joined directly, but separate messages may or may not
+ * end in a line break, so both the joined text and the last message on its own are checked.
  */
 export function findLimitNotice(timeline: readonly TimelineItem[]): LimitNotice | null {
-  let start = timeline.length;
-  while (start > 0 && timeline[start - 1]?.type === "assistant_message") start--;
-  const finalText = timeline
-    .slice(start)
-    .map((item) => item.text ?? "")
-    .join("");
-  const lastLine = finalText.trim().split("\n").pop()?.trim() ?? "";
-
-  const match = NOTICE.exec(lastLine);
+  const items = finalItems(timeline);
+  if (items.length === 0) return null;
+  // An error item always starts a new line.
+  const joined = items.map((item) => (item.type === "error" ? `\n${textOf(item)}` : textOf(item))).join("");
+  const lastItem = items[items.length - 1] as TimelineItem;
+  const match = matchNoticeLine(lastLineOf(joined)) ?? matchNoticeLine(lastLineOf(textOf(lastItem)));
   if (!match) return null;
   const [, kind, monthFirst, dayAfter, dayFirst, monthAfter, hourText, minuteText, meridiem, timeZone] = match;
 
@@ -84,6 +121,19 @@ export function findLimitNotice(timeline: readonly TimelineItem[]): LimitNotice 
     hour = rawHour;
   }
   return { kind: kind?.trim().toLowerCase() ?? "usage", month, day, hour, minute, timeZone: timeZone ?? null };
+}
+
+// Loose signs of a limit message whose exact wording the notice pattern does not know.
+const LIMIT_WORDS = /\b(?:usage|rate|session|weekly|hour|5-hour)\s+limit\b|\blimit\b[^\n]{0,80}\breset|\bout of (?:extra )?usage\b/i;
+
+/**
+ * True when the end of the final text looks like a limit message the notice pattern did not
+ * recognise. Never enough to resume on its own: usage data must confirm the limit.
+ */
+export function mentionsLimit(timeline: readonly TimelineItem[]): boolean {
+  const items = finalItems(timeline);
+  const tail = items.map(textOf).join("\n").trim().slice(-300);
+  return LIMIT_WORDS.test(tail);
 }
 
 interface WallClock {

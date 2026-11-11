@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { findLimitNotice, resetFromClock } from "../server/notice.ts";
+import { findLimitNotice, mentionsLimit, resetFromClock } from "../server/notice.ts";
 import { resetFromUsage } from "../server/usage.ts";
 
 const assistant = (text: string) => ({ type: "assistant_message", text });
@@ -22,8 +22,55 @@ test("ignores the notice when work followed it", () => {
   assert.equal(findLimitNotice([assistant(NOTICE), tool]), null);
 });
 
+test("finds the notice stored as an error item, as in the November 8 failure", () => {
+  const timeline = [
+    { type: "user_message", text: "check the apps" },
+    tool,
+    { type: "error", message: "You've hit your 5-hour limit · resets 12:30am (Europe/Amsterdam)" },
+  ];
+  assert.deepEqual(findLimitNotice(timeline), {
+    kind: "5-hour", month: null, day: null, hour: 0, minute: 30, timeZone: "Europe/Amsterdam",
+  });
+});
+
+test("finds the notice in an error item after assistant text", () => {
+  const timeline = [assistant("Stopped partway through."), { type: "error", message: NOTICE }];
+  assert.equal(findLimitNotice(timeline)?.kind, "session");
+});
+
+test("ignores an error item that is not a limit notice", () => {
+  assert.equal(findLimitNotice([{ type: "error", message: "Network timeout" }]), null);
+});
+
+test("finds the notice in a separate message joined without a line break, as on November 11", () => {
+  const timeline = [
+    tool,
+    assistant("Nothing will be committed, and no host is touched."),
+    assistant("You've hit your 5-hour limit · resets 2:30pm (Europe/Amsterdam)"),
+  ];
+  assert.deepEqual(findLimitNotice(timeline), {
+    kind: "5-hour", month: null, day: null, hour: 14, minute: 30, timeZone: "Europe/Amsterdam",
+  });
+});
+
+test("finds the notice after the agent's sentence in the same message", () => {
+  assert.equal(findLimitNotice([assistant(`I'll pick this up next. ${NOTICE}`)])?.kind, "session");
+});
+
 test("ignores the notice quoted inside a sentence", () => {
   assert.equal(findLimitNotice([assistant(`The CLI prints "${NOTICE}" when limited.`)]), null);
+});
+
+test("ignores the notice quoted at the end of a message", () => {
+  assert.equal(findLimitNotice([assistant(`The CLI prints "${NOTICE}"`)]), null);
+  assert.equal(findLimitNotice([assistant(`The CLI prints “${NOTICE}”`)]), null);
+});
+
+test("notices limit wording the pattern does not know, for a usage check", () => {
+  assert.equal(mentionsLimit([tool, assistant("Done.\n"), assistant("Usage limit hit. Try again at 4pm.")]), true);
+  assert.equal(mentionsLimit([assistant("Your limit will be lifted after the reset tonight.")]), true);
+  assert.equal(mentionsLimit([assistant("I raised the upload size limit to 10 MB.")]), false);
+  assert.equal(mentionsLimit([assistant("Usage limit hit."), tool]), false);
 });
 
 test("ignores the notice when it is not the last line", () => {

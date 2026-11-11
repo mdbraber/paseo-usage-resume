@@ -8,14 +8,28 @@ provider usage limit, once the limit has reset.
 When an agent's turn ends, the plugin checks why it stopped:
 
 - **Claude** reports a usage limit as an ordinary final message, for example
-  `You've hit your session limit · resets 5:50pm (America/Los_Angeles)`. The plugin acts only when
-  that notice is the last line of the agent's final message. The wording, separator, date and
-  clock format may vary, since Claude Code has changed them over time. The reset time
+  `You've hit your session limit · resets 5:50pm (America/Los_Angeles)`, or sometimes as an error
+  item. The plugin acts only when that notice ends the agent's final text. The notice may sit on
+  its own line or directly after the agent's last sentence, since separate messages are not always
+  separated by a line break. A notice inside quotes never counts. The wording, separator, date
+  and clock format may vary, since Claude Code has changed them over time. The reset time
   comes from Paseo's usage data for the matching window. Without it, the plugin converts the
   notice's clock time from the time zone the notice names, so it works on daemons in any zone.
 - **Codex** and other providers with usage data fail the turn instead. The plugin then reads
   Paseo's usage data and acts only if a usage window for that provider is at 100%. Because Paseo
   caches usage for five minutes, it checks once more after the cache expires.
+- **Unrecognised wording.** When a completed turn's final text mentions a limit (for example
+  "usage limit" or "limit … reset") but the notice pattern does not match it, the plugin does the
+  same usage check. The text alone never leads to a resume.
+
+Every ten minutes the plugin also checks idle agents that were active in the last 24 hours. If an
+agent's timeline ends with a limit notice written in that time and no resume is scheduled for it,
+the plugin schedules one. This covers a turn-end event that was missed, a notice an older version
+did not recognise, and a plugin reload or daemon restart. The reset is computed from the time the
+notice was written, so a reset that has already passed leads to a resume two minutes later. Once
+an agent has been resumed, its timeline no longer ends with the notice, so it is not resumed twice.
+The plugin API is only handed to hooks, so the check starts at the first agent event after the
+plugin loads, such as any agent's turn starting or ending.
 
 Two minutes after the reset, it sends the agent a fixed prompt:
 
@@ -39,14 +53,18 @@ request the app sends when an agent is opened, over its existing daemon connecti
 
 ## Limitations
 
-- Pending resumes live in memory; a plugin reload or daemon restart drops them.
+- Pending resumes live in memory. After a plugin reload or daemon restart, the periodic check
+  restores them for Claude notices, but only once some agent event has started it, and only
+  for notices from the last 24 hours. Resumes based only on usage data (Codex and others) are
+  not restored.
 - Marking the agent as read relies on Paseo's internal plugin connection format, which a
   Paseo update could change. If it breaks, the resume still happens but may not notify.
 - Providers without usage data in Paseo (for example DeepSeek) are never resumed.
 - Credit balances are ignored, since a zero prepaid balance is normal.
 - A notice whose wording departs further than the variants in `test/notice.test.ts` is not
-  matched. The plugin logs every finished turn, so a missed notice shows up as a turn with no
-  `usage:` line after it.
+  matched, and is resumed only if the final text mentions a limit and usage data confirms it.
+  The plugin logs every finished turn, so a missed notice shows up as a turn with no `usage:`
+  line after it.
 
 ## Install
 
