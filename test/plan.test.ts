@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { findLimitNotice, resetFromClock } from "../server/notice.ts";
-import { chooseReset, isCatchUpCandidate } from "../server/plan.ts";
+import { chooseReset, isCatchUpCandidate, resumeBlocker } from "../server/plan.ts";
 
 const NOW = Date.parse("2026-11-11T14:05:00Z");
 const HOUR = 60 * 60_000;
@@ -36,8 +36,24 @@ test("checks only waiting, recently active, unarchived agents", () => {
   assert.equal(isCatchUpCandidate({ status: "idle", updatedAt: recent }, NOW), true);
   assert.equal(isCatchUpCandidate({ status: "error", updatedAt: recent }, NOW), true);
   assert.equal(isCatchUpCandidate({ status: "running", updatedAt: recent }, NOW), false);
-  assert.equal(isCatchUpCandidate({ status: "closed", updatedAt: recent }, NOW), false);
+  // Paseo reports an agent as closed once it has shut down the idle agent's process.
+  assert.equal(isCatchUpCandidate({ status: "closed", updatedAt: recent }, NOW), true);
+  assert.equal(isCatchUpCandidate({ status: "initializing", updatedAt: recent }, NOW), false);
   assert.equal(isCatchUpCandidate({ status: "idle", updatedAt: recent, archivedAt: recent }, NOW), false);
   assert.equal(isCatchUpCandidate({ status: "idle", updatedAt: recent, pendingPermissions: [{}] }, NOW), false);
   assert.equal(isCatchUpCandidate({ status: "idle", updatedAt: new Date(NOW - 25 * HOUR).toISOString() }, NOW), false);
+});
+
+test("resumes agents whose idle runtime Paseo shut down, but not busy or archived ones", () => {
+  const recent = new Date(NOW - HOUR).toISOString();
+  assert.equal(resumeBlocker({ status: "idle" }), null);
+  assert.equal(resumeBlocker({ status: "closed" }), null);
+  assert.equal(resumeBlocker({ status: "error" }), null);
+  assert.equal(resumeBlocker({ status: "running" }), "agent is running");
+  assert.equal(resumeBlocker({ status: "initializing" }), "agent is initializing");
+  assert.equal(resumeBlocker({ status: "closed", archivedAt: recent }), "agent is archived");
+  assert.equal(resumeBlocker({ status: "idle", activeTurn: {} }), "agent has an active turn");
+  assert.equal(resumeBlocker({ status: "idle", pendingPermissions: [{}] }), "agent has a pending permission request");
+  assert.equal(resumeBlocker(null), "agent is unavailable");
+  assert.equal(resumeBlocker({}), "agent is unavailable");
 });

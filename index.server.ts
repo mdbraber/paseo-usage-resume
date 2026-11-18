@@ -1,7 +1,7 @@
 import type { PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
 import { clearAttention } from "./server/attention";
 import { findLimitNotice, mentionsLimit, resetFromClock, type TimelineItem } from "./server/notice";
-import { CATCH_UP_WINDOW_MS, chooseReset, isCatchUpCandidate } from "./server/plan";
+import { CATCH_UP_WINDOW_MS, chooseReset, isCatchUpCandidate, resumeBlocker, WAITING_STATUSES } from "./server/plan";
 import { describeUsage, findExhaustion, resetFromUsage } from "./server/usage";
 
 // Fixed text. Nothing from the transcript or the provider error is ever sent.
@@ -87,11 +87,12 @@ export default function contribute(server: PluginServerContext) {
     schedule(agent.id, delayMs, `resume after ${limitId} reset`, async () => {
       const ref = paseo.agents.ref(agent.id);
       await ref.refresh();
-      const busy = ref.status === "running" || ref.status === "initializing";
-      if (busy || ref.status === "closed" || ref.archivedAt || ref.activeTurn || ref.pendingPermissions?.length) {
-        console.log(`[${agent.id}] skipped resume: agent is ${ref.status ?? "unavailable"}`);
+      const blocker = resumeBlocker(ref);
+      if (blocker) {
+        console.log(`[${agent.id}] skipped resume: ${blocker}`);
         return;
       }
+      if (ref.status === "closed") console.log(`[${agent.id}] agent runtime was shut down while idle; the resume restarts it`);
       // Otherwise the unread limit notice suppresses the notification for the resumed turn.
       if (ref.current()?.requiresAttention && !clearAttention(agent.id)) {
         console.log(`[${agent.id}] could not clear the unread flag; the resumed turn may not notify`);
@@ -186,7 +187,7 @@ export default function contribute(server: PluginServerContext) {
     catchUpRunning = true;
     try {
       const now = Date.now();
-      const { entries } = await paseo.agents.list({ filter: { statuses: ["idle", "error"] }, page: { limit: 200 } });
+      const { entries } = await paseo.agents.list({ filter: { statuses: [...WAITING_STATUSES] }, page: { limit: 200 } });
       for (const { agent } of entries) {
         if (pending.has(agent.id) || !isCatchUpCandidate(agent, now)) continue;
         const before = examined.get(agent.id);

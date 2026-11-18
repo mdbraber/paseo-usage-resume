@@ -22,7 +22,8 @@ When an agent's turn ends, the plugin checks why it stopped:
   "usage limit" or "limit … reset") but the notice pattern does not match it, the plugin does the
   same usage check. The text alone never leads to a resume.
 
-Every ten minutes the plugin also checks idle agents that were active in the last 24 hours. If an
+Every ten minutes the plugin also checks waiting agents (idle, closed or stopped with an error)
+that were active in the last 24 hours. If an
 agent's timeline ends with a limit notice written in that time and no resume is scheduled for it,
 the plugin schedules one. This covers a turn-end event that was missed, a notice an older version
 did not recognise, and a plugin reload or daemon restart. The reset is computed from the time the
@@ -47,7 +48,10 @@ request the app sends when an agent is opened, over its existing daemon connecti
 - The prompt is fixed text. Nothing from the transcript or the provider error is sent.
 - Each limit is resumed once, with a backstop of six resumes per agent per day.
 - A pending resume is cancelled when a new turn starts or the agent is archived.
-- Just before sending, the agent must be idle, with no active turn or pending permission request.
+- Just before sending, the agent must be waiting (idle, closed or stopped with an error), not
+  archived, with no active turn or pending permission request. Paseo shuts down an agent's
+  provider process after about an hour idle and then reports the agent as closed, so an agent
+  waiting out a limit is usually closed by the time it resets; the resume prompt restarts it.
 - Without a usable reset time, or with a reset more than eight days away, it does nothing.
 - No runtime dependencies, network calls, or shell commands of its own.
 
